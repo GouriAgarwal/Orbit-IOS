@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+coverage/
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.pem
+*.p12
