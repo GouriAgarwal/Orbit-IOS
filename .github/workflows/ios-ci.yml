@@ -1,9 +1,10 @@
 name: iOS CI
 on:
   push:
-    paths: ['apps/ios/**']
+    paths: ['apps/ios/**', '.github/workflows/ios-ci.yml']
   pull_request:
-    paths: ['apps/ios/**']
+    paths: ['apps/ios/**', '.github/workflows/ios-ci.yml']
+  workflow_dispatch:
 jobs:
   build:
     runs-on: macos-15
