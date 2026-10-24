@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct DiscoverView: View {
+    @EnvironmentObject private var auth: AuthState
     @StateObject private var model = DiscoverViewModel()
     @State private var selectedEvent: OrbitEvent?
     @State private var savedIDs: Set<String> = []
@@ -27,7 +28,7 @@ struct DiscoverView: View {
             .background(OrbitStyle.paper.ignoresSafeArea())
             .toolbar(.hidden, for: .navigationBar)
             .refreshable { await model.load() }
-            .task { await model.load(); await loadSavedEvents() }
+            .task { model.interests = auth.interests; await model.load(); await loadSavedEvents() }
             .onChange(of: model.scope) { Task { await model.load() } }
             .onChange(of: model.category) { Task { await model.load() } }
             .onChange(of: model.search) { Task { await model.load() } }
@@ -92,9 +93,9 @@ struct DiscoverView: View {
 
     private var sectionHeader: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Happening soon").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(OrbitStyle.ink)
+            Text(auth.interests.isEmpty ? "Happening soon" : "Picked for you").font(.system(.title3, design: .rounded, weight: .bold)).foregroundStyle(OrbitStyle.ink)
             Spacer()
-            Text("\(model.events.count) EVENTS").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(1).foregroundStyle(OrbitStyle.ink.opacity(0.5))
+            Text(auth.interests.isEmpty ? "\(model.events.count) EVENTS" : "BASED ON YOUR INTERESTS").font(.system(size: 9, weight: .bold, design: .rounded)).tracking(1).foregroundStyle(OrbitStyle.ink.opacity(0.5))
         }.padding(.top, 2)
     }
 

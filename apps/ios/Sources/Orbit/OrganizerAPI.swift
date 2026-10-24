@@ -6,6 +6,20 @@ struct OrganizerClub: Decodable, Identifiable, Sendable {
     let college: OrganizerCollege
     let currentRole: String?
 }
+struct ClubVerificationRequest: Decodable, Identifiable, Sendable {
+    struct Club: Decodable, Sendable { let id: String; let name: String; let college: OrganizerCollege }
+    struct Applicant: Decodable, Sendable { let emailNormalized: String; let studentProfile: Profile? }
+    struct Profile: Decodable, Sendable { let displayName: String }
+    let id: String; let clubId: String; let proofUrl: String; let proofNotes: String; let status: String
+    let submittedAt: String; let eligibleAt: String; let reviewNote: String?; let club: Club; let applicant: Applicant?
+    static func isEligible(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date <= Date() }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value).map { $0 <= Date() } ?? false
+    }
+}
 struct OrganizerClubMember: Decodable, Identifiable, Sendable {
     let id: String; let userId: String; let role: String; let status: String; let user: User
     struct User: Decodable, Sendable { let id: String; let studentProfile: Profile? }
@@ -29,6 +43,9 @@ struct OrganizerAPI: Sendable {
 
     func colleges() async throws -> [OrganizerCollege] { try await request("clubs/colleges") }
     func clubs() async throws -> [OrganizerClub] { try await authorized("GET", "clubs/me") }
+    func verificationRequests() async throws -> [ClubVerificationRequest] { try await authorized("GET", "clubs/verification/me") }
+    func verificationQueue() async throws -> [ClubVerificationRequest] { try await authorized("GET", "clubs/verification/queue") }
+    func decideVerification(id: String, decision: String, note: String) async throws { let _: StatusResponse = try await authorized("PATCH", "clubs/verification/\(id)", body: ["decision": decision, "note": note]) }
     func members(clubId: String) async throws -> [OrganizerClubMember] { try await authorized("GET", "clubs/\(clubId)/members") }
     func invite(clubId: String, email: String, role: String) async throws { let _: OrganizerClubMember = try await authorized("POST", "clubs/\(clubId)/invitations", body: ["email": email, "role": role]) }
     func updateMember(clubId: String, userId: String, role: String) async throws { let _: StatusResponse = try await authorized("PATCH", "clubs/\(clubId)/members/\(userId)", body: ["role": role]) }
@@ -39,8 +56,11 @@ struct OrganizerAPI: Sendable {
         let response: PosterUploadResponse = try await authorized("POST", "events/posters", body: ["clubId": clubId, "imageBase64": jpegData.base64EncodedString()])
         return response.posterUrl
     }
-    func createClub(collegeId: String, name: String, description: String) async throws -> OrganizerClub {
-        try await authorized("POST", "clubs", body: ["collegeId": collegeId, "name": name, "description": description])
+    func createClub(collegeId: String, name: String, description: String, proofUrl: String, proofNotes: String) async throws -> OrganizerClub {
+        try await authorized("POST", "clubs", body: ["collegeId": collegeId, "name": name, "description": description, "proofUrl": proofUrl, "proofNotes": proofNotes])
+    }
+    func resubmitClubVerification(clubId: String, proofUrl: String, proofNotes: String) async throws {
+        let _: ClubVerificationRequest = try await authorized("POST", "clubs/\(clubId)/verification", body: ["proofUrl": proofUrl, "proofNotes": proofNotes])
     }
     func createEvent(clubId: String, title: String, description: String, category: String, format: String, venue: String, startsAt: Date, endsAt: Date, deadline: Date?, capacity: Int?, minStudentsPerTeam: Int, maxStudentsPerTeam: Int, registrationMode: String, externalUrl: String?, posterUrl: String?) async throws -> OrganizerEvent {
         let encoder = ISO8601DateFormatter()
@@ -59,6 +79,8 @@ struct OrganizerAPI: Sendable {
     func publish(eventId: String) async throws -> OrganizerEvent { try await authorized("POST", "events/\(eventId)/publish") }
     func attendees(eventId: String) async throws -> [OrganizerAttendee] { try await authorized("GET", "events/\(eventId)/registrations") }
     func markAttendance(eventId: String, registrationId: String, status: String) async throws { let _: StatusResponse = try await authorized("PATCH", "events/\(eventId)/registrations/\(registrationId)", body: ["status": status]) }
+    func reviews(eventId: String) async throws -> EventReviewPage { try await authorized("GET", "events/\(eventId)/reviews") }
+    func replyToReview(eventId: String, reviewId: String, reply: String) async throws { let _: StatusResponse = try await authorized("PATCH", "events/\(eventId)/reviews/\(reviewId)/reply", body: ["reply": reply]) }
 
     private func authorized<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> T {
         guard let stored = TokenVault.load() else { throw OrganizerAPIError.message("Your session expired. Sign in again.") }

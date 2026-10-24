@@ -33,17 +33,152 @@ export class EventsService {
         ...(query.q ? { OR: [{ title: { contains: query.q, mode: 'insensitive' } }, { description: { contains: query.q, mode: 'insensitive' } }] } : {}),
         ...(query.from || query.to ? { startsAt: { ...(query.from ? { gte: new Date(query.from) } : {}), ...(query.to ? { lte: new Date(query.to) } : {}) } } : {}),
       },
-      include: { club: { include: { college: true } } }, orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+      include: {
+        club: {
+          include: {
+            college: true,
+            memberships: {
+              where: { role: 'owner', status: 'active' },
+              select: { user: { select: { studentProfile: { select: { displayName: true } } } } },
+              take: 1,
+            },
+          },
+        },
+      },
+      orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
       take: 21, ...(query.cursor ? { skip: 1, cursor: { id: query.cursor } } : {}),
     });
-    const data = rows.slice(0, 20).map(({ club, ...event }) => ({ ...event, club: { id: club.id, name: club.name, college: club.college.name } }));
+    const data = rows.slice(0, 20).map(({ club, ...event }) => ({ ...event, club: { id: club.id, name: club.name, college: club.college.name, organizerName: club.memberships[0]?.user.studentProfile?.displayName ?? null } }));
     return { data, nextCursor: rows.length > 20 ? rows[19].id : null };
   }
 
-  async get(id: string) {
-    const event = await this.prisma.event.findFirst({ where: { id, status: 'published' }, include: { club: { include: { college: true } } } });
+  async recommended(userId: string, query: { campus?: string; category?: string; from?: string; to?: string; q?: string }) {
+    const profile = await this.prisma.studentProfile.findUnique({ where: { userId }, select: { interests: true } });
+    const page = await this.list(query);
+    const interests = (profile?.interests ?? []).map((interest) => interest.trim().toLocaleLowerCase()).filter(Boolean);
+    if (!interests.length) return page;
+
+    const terms: Record<string, string[]> = {
+      'technology': ['technology', 'tech', 'coding', 'software', 'programming', 'developer', 'open source'],
+      'hackathons': ['hackathon', 'hackathons', 'build sprint', 'prototype'],
+      'design & ui/ux': ['design', 'ui', 'ux', 'figma', 'visual', 'product'],
+      'entrepreneurship': ['entrepreneur', 'startup', 'business', 'pitch', 'founder'],
+      'ai & data science': ['artificial intelligence', 'machine learning', 'data science', 'analytics', 'robotics'],
+      'arts & culture': ['art', 'arts', 'culture', 'creative', 'exhibition', 'theatre'],
+      'music': ['music', 'concert', 'singing', 'band', 'sound'],
+      'sports': ['sport', 'sports', 'fitness', 'athletic', 'tournament', 'football', 'cricket'],
+      'gaming': ['gaming', 'game', 'esports', 'esports', 'game jam'],
+      'career & networking': ['career', 'networking', 'interview', 'internship', 'industry', 'professional'],
+      'wellness': ['wellness', 'mental health', 'mindfulness', 'health', 'yoga'],
+      'volunteering': ['volunteer', 'volunteering', 'community service', 'social impact', 'outreach'],
+      'photography': ['photography', 'photo', 'camera', 'visual storytelling'],
+      'finance': ['finance', 'financial', 'investing', 'economics', 'fintech'],
+      'environment': ['environment', 'sustainability', 'climate', 'conservation', 'green'],
+      'writing & literature': ['writing', 'literature', 'poetry', 'reading', 'storytelling'],
+      'workshops & learning': ['workshop', 'workshops', 'learning', 'masterclass', 'training'],
+    };
+    const interestTerms = interests.flatMap((interest) => terms[interest] ?? [interest]);
+    const ranked = page.data.map((event, index) => {
+      const title = event.title.toLocaleLowerCase();
+      const category = event.category.toLocaleLowerCase();
+      const description = event.description.toLocaleLowerCase();
+      const score = interestTerms.reduce((total, term) => total + (category.includes(term) ? 5 : 0) + (title.includes(term) ? 3 : 0) + (description.includes(term) ? 1 : 0), 0);
+      return { event, score, index };
+    }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ event }) => event);
+    return { ...page, data: ranked };
+  }
+
+  async reviews(eventId: string) {
+    const event = await this.prisma.event.findFirst({ where: { id: eventId, status: 'published' }, select: { id: true } });
     if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
-    return { ...event, club: { id: event.club.id, name: event.club.name, college: event.club.college.name } };
+    const reviews = await this.prisma.eventReview.findMany({
+      where: { eventId }, include: { author: { select: { studentProfile: { select: { displayName: true } } } } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 100,
+    });
+    const total = reviews.reduce((sum, review) => sum + review.rating, 0);
+    return { data: reviews.map(({ author, ...review }) => ({ ...review, authorName: author.studentProfile?.displayName ?? 'Student' })), averageRating: reviews.length ? total / reviews.length : null, reviewCount: reviews.length };
+  }
+
+  async createReview(userId: string, eventId: string, rating: number, body: string) {
+    const event = await this.prisma.event.findFirst({ where: { id: eventId, status: 'published' } });
+    if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
+    if (event.endsAt > new Date()) throw new BadRequestException({ error: { code: 'EVENT_NOT_FINISHED', message: 'You can review this event after it finishes.' } });
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5 || typeof body !== 'string' || body.trim().length < 5 || body.trim().length > 1500) {
+      throw new BadRequestException({ error: { code: 'INVALID_REVIEW', message: 'Choose a 1–5 star rating and write 5–1,500 characters.' } });
+    }
+    const registration = await this.prisma.registration.findUnique({ where: { eventId_studentId: { eventId, studentId: userId } }, select: { status: true } });
+    if (!registration || !['registered', 'attended'].includes(registration.status)) throw new ForbiddenException({ error: { code: 'REVIEW_REQUIRES_ATTENDANCE', message: 'Only registered attendees can review this event.' } });
+    const review = await this.prisma.eventReview.upsert({
+      where: { eventId_authorId: { eventId, authorId: userId } },
+      create: { eventId, authorId: userId, rating, body: body.trim() },
+      update: { rating, body: body.trim(), organizerReply: null, organizerRepliedAt: null },
+      include: { author: { select: { studentProfile: { select: { displayName: true } } } } },
+    });
+    const organizers = await this.prisma.clubMembership.findMany({ where: { clubId: event.clubId, status: 'active', userId: { not: userId } }, select: { userId: true } });
+    if (organizers.length) await this.prisma.notification.createMany({ data: organizers.map(({ userId: organizerId }) => ({ userId: organizerId, type: 'event_review_received', title: 'New attendee review', body: `A student left a review for ${event.title}. Open the event in Organizer to read and reply.`, payload: { eventId, reviewId: review.id } })) });
+    const { author, ...reviewData } = review;
+    return { ...reviewData, authorName: author.studentProfile?.displayName ?? 'Student' };
+  }
+
+  async replyToReview(userId: string, eventId: string, reviewId: string, reply: string) {
+    const event = await this.prisma.event.findUnique({ where: { id: eventId }, select: { id: true, clubId: true, title: true } });
+    if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
+    await this.assertOrganizer(userId, event.clubId);
+    const text = reply?.trim();
+    if (!text || text.length > 1000) throw new BadRequestException({ error: { code: 'INVALID_REVIEW_REPLY', message: 'Organizer replies must be 1–1,000 characters.' } });
+    const existing = await this.prisma.eventReview.findFirst({ where: { id: reviewId, eventId }, select: { id: true, authorId: true } });
+    if (!existing) throw new NotFoundException({ error: { code: 'REVIEW_NOT_FOUND', message: 'Review was not found.' } });
+    await this.prisma.eventReview.update({ where: { id: reviewId }, data: { organizerReply: text, organizerRepliedAt: new Date() } });
+    await this.prisma.notification.create({ data: { userId: existing.authorId, type: 'event_review_reply', title: 'The organizer replied to your review', body: `The club organizer replied to your review of ${event.title}. Open the event details to read the reply.`, payload: { eventId, reviewId } } });
+    return { success: true };
+  }
+
+  async eventMessages(userId: string, eventId: string) {
+    await this.assertEventParticipant(userId, eventId);
+    const messages = await this.prisma.eventMessage.findMany({
+      where: { eventId }, include: { sender: { select: { id: true, studentProfile: { select: { displayName: true } } } } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: 200,
+    });
+    return messages.map(({ sender, ...message }) => ({ ...message, senderName: sender.studentProfile?.displayName ?? 'Student', senderId: sender.id }));
+  }
+
+  async postEventMessage(userId: string, eventId: string, body: string) {
+    await this.assertEventParticipant(userId, eventId);
+    const event = await this.prisma.event.findUnique({ where: { id: eventId }, select: { title: true, clubId: true } });
+    if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
+    const text = body?.trim();
+    if (!text || text.length > 1000) throw new BadRequestException({ error: { code: 'INVALID_EVENT_MESSAGE', message: 'Messages must be 1–1,000 characters.' } });
+    const message = await this.prisma.eventMessage.create({
+      data: { eventId, senderId: userId, body: text },
+      include: { sender: { select: { id: true, studentProfile: { select: { displayName: true } } } } },
+    });
+    const senderIsClubMember = await this.prisma.clubMembership.findFirst({ where: { clubId: event.clubId, userId, status: 'active' }, select: { id: true } });
+    const recipients = senderIsClubMember
+      ? await this.prisma.registration.findMany({ where: { eventId, status: { in: ['registered', 'attended'] }, studentId: { not: userId } }, select: { studentId: true } })
+      : await this.prisma.clubMembership.findMany({ where: { clubId: event.clubId, status: 'active', userId: { not: userId } }, select: { userId: true } });
+    const recipientIds = recipients.map((recipient) => 'studentId' in recipient ? recipient.studentId : recipient.userId);
+    if (recipientIds.length) await this.prisma.notification.createMany({ data: recipientIds.map((recipientId) => ({ userId: recipientId, type: 'event_thread_message', title: `New message in ${event.title}`, body: `${message.sender.studentProfile?.displayName ?? 'A participant'} added a message to the event conversation.`, payload: { eventId } })) });
+    return { id: message.id, eventId: message.eventId, senderId: message.sender.id, senderName: message.sender.studentProfile?.displayName ?? 'Student', body: message.body, createdAt: message.createdAt };
+  }
+
+  async get(id: string) {
+    const event = await this.prisma.event.findFirst({
+      where: { id, status: 'published' },
+      include: {
+        club: {
+          include: {
+            college: true,
+            memberships: {
+              where: { role: 'owner', status: 'active' },
+              select: { user: { select: { studentProfile: { select: { displayName: true } } } } },
+              take: 1,
+            },
+          },
+        },
+      },
+    });
+    if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
+    return { ...event, club: { id: event.club.id, name: event.club.name, college: event.club.college.name, organizerName: event.club.memberships[0]?.user.studentProfile?.displayName ?? null } };
   }
 
   async mine(userId: string) {
@@ -184,8 +319,21 @@ export class EventsService {
   }
 
   private async assertOrganizer(userId: string, clubId: string) {
+    // Existing active organizer memberships keep their access. New club claims
+    // receive no active membership until an allowlisted verifier approves them.
     const membership = await this.prisma.clubMembership.findUnique({ where: { clubId_userId: { clubId, userId } } });
     if (!membership || membership.status !== 'active') throw new ForbiddenException({ error: { code: 'CLUB_ACCESS_DENIED', message: 'You are not an active member of this club.' } });
+  }
+
+  private async assertEventParticipant(userId: string, eventId: string) {
+    const event = await this.prisma.event.findUnique({ where: { id: eventId }, select: { id: true, clubId: true } });
+    if (!event) throw new NotFoundException({ error: { code: 'EVENT_NOT_FOUND', message: 'Event was not found.' } });
+    const [membership, registration] = await Promise.all([
+      this.prisma.clubMembership.findUnique({ where: { clubId_userId: { clubId: event.clubId, userId } }, select: { status: true } }),
+      this.prisma.registration.findUnique({ where: { eventId_studentId: { eventId, studentId: userId } }, select: { status: true } }),
+    ]);
+    if (membership?.status === 'active' || registration && ['registered', 'attended'].includes(registration.status)) return;
+    throw new ForbiddenException({ error: { code: 'EVENT_THREAD_REQUIRES_REGISTRATION', message: 'The event thread is available to registered attendees and the host club.' } });
   }
 
   private eventInput(input: Record<string, unknown>): Prisma.EventUncheckedCreateInput;

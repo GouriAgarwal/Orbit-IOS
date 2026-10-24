@@ -12,6 +12,7 @@ struct CurrentUser: Decodable, Sendable {
     struct Profile: Decodable, Sendable {
         let displayName: String
         let bio: String
+        let interests: [String]?
     }
     let id: String
     let profile: Profile?
@@ -50,6 +51,15 @@ struct AuthClient: Sendable {
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(data, response)
         return try JSONDecoder().decode(CurrentUser.self, from: data)
+    }
+    func saveInterests(_ interests: [String], accessToken: String) async throws {
+        var request = URLRequest(url: baseURL.appendingPathComponent("me/profile"))
+        request.httpMethod = "PATCH"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["interests": interests])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(data, response)
     }
     private func post<T: Decodable>( _ path: String, body: [String: String]) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))

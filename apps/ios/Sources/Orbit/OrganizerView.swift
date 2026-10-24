@@ -7,6 +7,8 @@ import UIKit
 final class OrganizerViewModel: ObservableObject {
     @Published var colleges: [OrganizerCollege] = []
     @Published var clubs: [OrganizerClub] = []
+    @Published var verificationRequests: [ClubVerificationRequest] = []
+    @Published var verificationQueue: [ClubVerificationRequest] = []
     @Published var events: [OrganizerEvent] = []
     @Published var message: String?
     @Published var busy = false
@@ -19,13 +21,25 @@ final class OrganizerViewModel: ObservableObject {
             // these requests sequential so they never race on the same token.
             colleges = try await api.colleges()
             clubs = try await api.clubs()
+            verificationRequests = try await api.verificationRequests()
+            verificationQueue = (try? await api.verificationQueue()) ?? []
             events = try await api.events()
             message = nil
         } catch { message = error.localizedDescription }
     }
-    func createClub(collegeId: String, name: String, description: String) async {
+    func createClub(collegeId: String, name: String, description: String, proofUrl: String, proofNotes: String) async {
         busy = true; defer { busy = false }
-        do { _ = try await api.createClub(collegeId: collegeId, name: name, description: description); await load() }
+        do { _ = try await api.createClub(collegeId: collegeId, name: name, description: description, proofUrl: proofUrl, proofNotes: proofNotes); await load(); message = "Club submitted for verification. Organizer tools unlock after verifier approval and the 48-hour holding period." }
+        catch { message = error.localizedDescription }
+    }
+    func resubmitVerification(_ claim: ClubVerificationRequest, proofUrl: String, proofNotes: String) async {
+        busy = true; defer { busy = false }
+        do { try await api.resubmitClubVerification(clubId: claim.clubId, proofUrl: proofUrl, proofNotes: proofNotes); await load(); message = "Updated proof submitted. The 48-hour holding period has restarted." }
+        catch { message = error.localizedDescription }
+    }
+    func decideVerification(_ claim: ClubVerificationRequest, decision: String, note: String = "") async {
+        busy = true; defer { busy = false }
+        do { try await api.decideVerification(id: claim.id, decision: decision, note: note); await load(); message = decision == "approve" ? "Club verified; organizer access granted." : "Verification request rejected. The applicant can resubmit proof." }
         catch { message = error.localizedDescription }
     }
     func createEvent(clubId: String, title: String, description: String, category: String, format: String, venue: String, startsAt: Date, endsAt: Date, deadline: Date?, capacity: Int?, minStudentsPerTeam: Int, maxStudentsPerTeam: Int, registrationMode: String, externalUrl: String?, posterData: Data?) async {
@@ -68,6 +82,8 @@ final class OrganizerViewModel: ObservableObject {
         catch { message = error.localizedDescription }
     }
     func attendees(_ event: OrganizerEvent) async throws -> [OrganizerAttendee] { try await api.attendees(eventId: event.id) }
+    func reviews(_ event: OrganizerEvent) async throws -> EventReviewPage { try await api.reviews(eventId: event.id) }
+    func replyToReview(_ review: EventReview, event: OrganizerEvent, reply: String) async throws { try await api.replyToReview(eventId: event.id, reviewId: review.id, reply: reply) }
     func markAttendance(_ attendee: OrganizerAttendee, event: OrganizerEvent, status: String) async throws { try await api.markAttendance(eventId: event.id, registrationId: attendee.id, status: status) }
 }
 
@@ -275,6 +291,11 @@ private struct OrganizerCreateView: View {
     @State private var deadline = Calendar.current.date(byAdding: .day, value: 6, to: .now) ?? .now
     @State private var eventPrompt = ""
     @State private var promptAssistantMessage: String?
+    @State private var planningPrompt = ""
+    @State private var eventIdeas: [OrganizerEventIdea] = []
+    @State private var eventIdeasEvidence: OrganizerIdeasResponse.Evidence?
+    @State private var eventIdeasMessage: String?
+    @State private var isLoadingIdeas = false
     @State private var posterSelection: PhotosPickerItem?
     @State private var posterData: Data?
     @State private var posterPreview: UIImage?
@@ -310,10 +331,43 @@ private struct OrganizerCreateView: View {
                         }.buttonStyle(.plain).disabled(eventPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if let promptAssistantMessage { Text(promptAssistantMessage).font(.caption).foregroundStyle(.secondary) }
                     }
+                    card("Plan around student interests", icon: "chart.bar.xaxis") {
+                        Text("Get event ideas from this club’s past registrations and students’ chosen interests. Only aggregated interest groups with at least 3 registrations are shared with Gemini.").font(.subheadline).foregroundStyle(.secondary)
+                        TextField("What kind of event are you planning?", text: $planningPrompt, axis: .vertical)
+                            .lineLimit(2...4).textFieldStyle(.roundedBorder)
+                        Button {
+                            Task { await loadEventIdeas() }
+                        } label: {
+                            HStack { if isLoadingIdeas { ProgressView() } else { Image(systemName: "sparkles"); Text("Suggest event ideas") } }
+                                .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 12)
+                                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+                        }.buttonStyle(.plain).disabled(isLoadingIdeas || selectedClub.isEmpty || planningPrompt.trimmingCharacters(in: .whitespacesAndNewlines).count < 8)
+                        if let eventIdeasEvidence {
+                            Text("Based on \(eventIdeasEvidence.registeredAttendeesCount) registrations. Interest labels are suppressed below 3 people.").font(.caption).foregroundStyle(.secondary)
+                            if !eventIdeasEvidence.popularInterests.isEmpty {
+                                Text("Top interests: " + eventIdeasEvidence.popularInterests.prefix(5).map { "\($0.label) (\($0.count))" }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if let eventIdeasMessage { Text(eventIdeasMessage).font(.caption).foregroundColor(eventIdeas.isEmpty ? Color.red : Color.secondary) }
+                        ForEach(eventIdeas) { idea in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(idea.title).font(.subheadline.weight(.bold))
+                                        Text("\(idea.category) · \(idea.minStudentsPerTeam)–\(idea.maxStudentsPerTeam) students").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Use idea") { applyIdea(idea) }.font(.caption.weight(.bold))
+                                }
+                                Text(idea.description).font(.caption)
+                                Text(idea.rationale).font(.caption).foregroundStyle(.secondary)
+                            }.padding(12).background(OrbitStyle.paper, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
                     card("Event details", icon: "sparkle.magnifyingglass") {
                         Picker("Host club", selection: $selectedClub) { ForEach(model.clubs) { Text($0.name).tag($0.id) } }
                         TextField("Event title", text: $title).textFieldStyle(.roundedBorder)
-                        Picker("Category", selection: $category) { ForEach(categories, id: \.self) { Text($0) } }
+                        Picker("Category", selection: $category) { ForEach(Array(Set(categories + [category])).sorted(), id: \.self) { Text($0) } }
                         TextField("What will happen?", text: $description, axis: .vertical).lineLimit(3...6).textFieldStyle(.roundedBorder)
                     }
                     card("When and where", icon: "calendar") {
@@ -424,6 +478,30 @@ private struct OrganizerCreateView: View {
         Task { await model.createEvent(clubId: club.id, title: title, description: description, category: category, format: format, venue: venue, startsAt: startsAt, endsAt: endsAt, deadline: hasDeadline ? deadline : nil, capacity: Int(capacity), minStudentsPerTeam: minStudentsPerTeam, maxStudentsPerTeam: maxStudentsPerTeam, registrationMode: registrationMode, externalUrl: externalUrl.isEmpty ? nil : externalUrl, posterData: posterData) }
     }
 
+    private func loadEventIdeas() async {
+        guard !selectedClub.isEmpty else { return }
+        isLoadingIdeas = true
+        eventIdeasMessage = nil
+        defer { isLoadingIdeas = false }
+        do {
+            let response = try await CommunityAPI().organizerEventIdeas(clubId: selectedClub, prompt: planningPrompt)
+            eventIdeas = response.ideas
+            eventIdeasEvidence = response.evidence
+            eventIdeasMessage = response.ideas.isEmpty ? "No event ideas came back. Try a more specific prompt." : nil
+        } catch { eventIdeasMessage = error.localizedDescription }
+    }
+
+    private func applyIdea(_ idea: OrganizerEventIdea) {
+        title = idea.title
+        description = idea.description
+        category = idea.category
+        format = idea.format
+        minStudentsPerTeam = idea.minStudentsPerTeam
+        maxStudentsPerTeam = idea.maxStudentsPerTeam
+        if format == "online" { venue = "" }
+        promptAssistantMessage = "Idea added to the event form. Review the details and choose the date and venue."
+    }
+
     private func card<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Label(title, systemImage: icon).font(.headline).foregroundStyle(.primary)
@@ -484,6 +562,9 @@ private struct OrganizerClubView: View {
     @ObservedObject var model: OrganizerViewModel
     @State private var name = ""
     @State private var description = ""
+    @State private var proofUrl = ""
+    @State private var proofNotes = ""
+    @State private var reviewerNote = ""
     @State private var selectedCollege = ""
     @State private var managedClub: OrganizerClub?
     var body: some View {
@@ -493,7 +574,7 @@ private struct OrganizerClubView: View {
                     if model.clubs.isEmpty { Text("No clubs yet. Create one below.").foregroundStyle(.secondary) }
                     ForEach(model.clubs) { club in
                         VStack(alignment: .leading) {
-                            HStack { Text(club.name).font(.headline); Spacer(); Text(club.verificationStatus.capitalized).font(.caption.weight(.semibold)).foregroundColor(club.verificationStatus == "approved" ? .green : .orange) }
+                            HStack { Text(club.name).font(.headline); Spacer(); Text("Organizer access").font(.caption.weight(.semibold)).foregroundColor(.green) }
                             Text("\(club.college.name) · Your role: \((club.currentRole ?? "editor").capitalized)").font(.caption).foregroundStyle(.secondary)
                             if club.currentRole == "owner" || club.currentRole == "manager" {
                                 Button("Manage members") { managedClub = club }.font(.caption.weight(.semibold)).padding(.top, 2)
@@ -505,10 +586,48 @@ private struct OrganizerClubView: View {
                     Picker("College", selection: $selectedCollege) { ForEach(model.colleges) { Text($0.name).tag($0.id) } }
                     TextField("Club name", text: $name)
                     TextField("What is the club about?", text: $description, axis: .vertical).lineLimit(2...4)
+                    TextField("Official club or college page (HTTPS)", text: $proofUrl).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("How does this page prove the club is official?", text: $proofNotes, axis: .vertical).lineLimit(2...4)
+                    Text("A verifier checks the proof. For safety, new club organizer access cannot be approved before 48 hours have passed.").font(.caption).foregroundStyle(.secondary)
                     Button("Create club") {
                         guard let college = model.colleges.first(where: { $0.id == selectedCollege }) ?? model.colleges.first else { return }
-                        Task { await model.createClub(collegeId: college.id, name: name, description: description); name = "" }
-                    }.disabled(model.busy || model.colleges.isEmpty || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Task { await model.createClub(collegeId: college.id, name: name, description: description, proofUrl: proofUrl, proofNotes: proofNotes); name = "" }
+                    }.disabled(model.busy || model.colleges.isEmpty || name.trimmingCharacters(in: .whitespaces).isEmpty || proofUrl.isEmpty || proofNotes.trimmingCharacters(in: .whitespacesAndNewlines).count < 10)
+                }
+                if !model.verificationRequests.isEmpty {
+                    Section("Verification status") {
+                        ForEach(model.verificationRequests) { claim in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack { Text(claim.club.name).font(.headline); Spacer(); Text(claim.status.capitalized).font(.caption.bold()).foregroundStyle(claim.status == "approved" ? .green : claim.status == "rejected" ? .red : .orange) }
+                                Text(claim.club.college.name).font(.caption).foregroundStyle(.secondary)
+                                if claim.status == "pending" { Text("A verifier is checking your proof. Organizer access can begin after the 48-hour hold and approval.").font(.caption).foregroundStyle(.secondary) }
+                                if let note = claim.reviewNote, !note.isEmpty { Text("Verifier note: \(note)").font(.caption).foregroundStyle(.secondary) }
+                                if claim.status == "rejected" {
+                                    Button("Resubmit using the proof fields above") { Task { await model.resubmitVerification(claim, proofUrl: proofUrl, proofNotes: proofNotes) } }
+                                        .disabled(model.busy || proofUrl.isEmpty || proofNotes.count < 10)
+                                }
+                            }.padding(.vertical, 4)
+                        }
+                    }
+                }
+                if !model.verificationQueue.isEmpty {
+                    Section("Club verification queue") {
+                        ForEach(model.verificationQueue) { claim in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(claim.club.name).font(.headline)
+                                Text("\(claim.club.college.name) · Applicant: \(claim.applicant?.studentProfile?.displayName ?? claim.applicant?.emailNormalized ?? "Student")").font(.caption).foregroundStyle(.secondary)
+                                Link(claim.proofUrl, destination: URL(string: claim.proofUrl) ?? URL(string: "https://example.com")!).font(.caption)
+                                Text(claim.proofNotes).font(.caption)
+                                Text("Eligible after: \(claim.eligibleAt)").font(.caption2).foregroundStyle(.secondary)
+                                TextField("Reviewer note (optional)", text: $reviewerNote, axis: .vertical).lineLimit(1...3).textFieldStyle(.roundedBorder)
+                                HStack {
+                                    Button("Approve and grant organizer access") { Task { await model.decideVerification(claim, decision: "approve") } }
+                                        .disabled(model.busy || !ClubVerificationRequest.isEligible(claim.eligibleAt))
+                                    Button("Reject", role: .destructive) { Task { await model.decideVerification(claim, decision: "reject", note: reviewerNote); reviewerNote = "" } }.disabled(model.busy)
+                                }.font(.caption.weight(.semibold))
+                            }.padding(.vertical, 5)
+                        }
+                    }
                 }
                 if let message = model.message { Section { Text(message).font(.footnote).foregroundStyle(.secondary) } }
             }.navigationTitle("Club").onAppear { if selectedCollege.isEmpty { selectedCollege = model.colleges.first?.id ?? "" } }
@@ -590,6 +709,10 @@ private struct OrganizerEventManagementView: View {
     @ObservedObject var model: OrganizerViewModel
     let event: OrganizerEvent
     @State private var attendees: [OrganizerAttendee] = []
+    @State private var reviews: [EventReview] = []
+    @State private var reviewAverage: Double?
+    @State private var reviewCount = 0
+    @State private var replyDrafts: [String: String] = [:]
     @State private var error: String?
     @State private var isLoading = false
     @State private var showEditor = false
@@ -631,6 +754,20 @@ private struct OrganizerEventManagementView: View {
                         }.padding(.vertical, 4)
                     }
                 }
+                Section("Reviews · \(reviewCount)") {
+                    if let reviewAverage { Label(String(format: "%.1f average rating", reviewAverage), systemImage: "star.fill").font(.caption.weight(.semibold)).foregroundStyle(OrbitStyle.coral) }
+                    if reviews.isEmpty && !isLoading { Text("Attendee reviews will appear here after the event.").foregroundStyle(.secondary) }
+                    ForEach(reviews) { review in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack { Text(review.authorName).font(.subheadline.weight(.semibold)); Spacer(); Label("\(review.rating)/5", systemImage: "star.fill").font(.caption.weight(.semibold)).foregroundStyle(OrbitStyle.coral) }
+                            Text(review.body).font(.subheadline)
+                            if let currentReply = review.organizerReply, !currentReply.isEmpty { Text("Your reply: \(currentReply)").font(.caption).foregroundStyle(.secondary) }
+                            TextField("Reply as the organizer…", text: Binding(get: { replyDrafts[review.id] ?? "" }, set: { replyDrafts[review.id] = $0 }), axis: .vertical).lineLimit(2...4).textFieldStyle(.roundedBorder)
+                            Button("Send reply") { Task { await sendReply(to: review) } }
+                                .font(.caption.weight(.semibold)).disabled((replyDrafts[review.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }.padding(.vertical, 5)
+                    }
+                }
                 if let error { Section { Text(error).font(.footnote).foregroundStyle(.red) } }
             }.navigationTitle(event.title).toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
                 .task { await loadAttendees() }
@@ -641,8 +778,20 @@ private struct OrganizerEventManagementView: View {
 
     private func loadAttendees() async {
         isLoading = true; defer { isLoading = false }
-        do { attendees = try await model.attendees(event); error = nil }
+        do {
+            attendees = try await model.attendees(event)
+            let page = try await model.reviews(event)
+            reviews = page.data; reviewAverage = page.averageRating; reviewCount = page.reviewCount
+            error = nil
+        }
         catch { self.error = error.localizedDescription }
+    }
+    private func sendReply(to review: EventReview) async {
+        do {
+            try await model.replyToReview(review, event: event, reply: replyDrafts[review.id] ?? "")
+            replyDrafts[review.id] = ""
+            await loadAttendees()
+        } catch { self.error = error.localizedDescription }
     }
     private func setAttendance(_ attendee: OrganizerAttendee, status: String) async {
         do { try await model.markAttendance(attendee, event: event, status: status); await loadAttendees() }

@@ -6,6 +6,18 @@ struct StudentProfileData: Decodable, Sendable {
     let displayName: String; let course: String?; let year: Int?; let bio: String; let skills: [String]; let interests: [String]; let projects: [StudentProject]
     let portfolioUrl: String?; let achievements: [String]?; let visibility: String?; let college: StudentCollege?
 }
+struct AITeamRoleDraft: Decodable, Sendable { let title: String; let description: String; let requiredSkills: [String]; let openings: Int }
+struct AITeamDraft: Decodable, Sendable { let name: String; let goal: String; let description: String; let roles: [AITeamRoleDraft] }
+struct OrganizerEventIdea: Decodable, Identifiable, Sendable {
+    var id: String { title }
+    let title: String; let category: String; let description: String; let format: String
+    let minStudentsPerTeam: Int; let maxStudentsPerTeam: Int; let rationale: String
+}
+struct OrganizerIdeasResponse: Decodable, Sendable { let ideas: [OrganizerEventIdea]; let evidence: Evidence
+    struct Evidence: Decodable, Sendable { let registeredAttendeesCount: Int; let popularInterests: [Item]; let priorEventCategories: [Item]
+        struct Item: Decodable, Identifiable, Sendable { var id: String { label }; let label: String; let count: Int }
+    }
+}
 struct CommunityTeam: Decodable, Identifiable, Sendable {
     let id: String; let ownerId: String; let eventId: String?; let name: String; let goal: String; let description: String; let skillsNeeded: [String]; let maxMembers: Int; let owner: String
     let ownerProfile: TeamPersonProfile?; let event: TeamEventOption?; let roles: [TeamRole]; let memberships: [TeamMembershipItem]
@@ -57,7 +69,10 @@ struct ConnectionRequestItem: Decodable, Identifiable, Sendable {
     struct Person: Decodable, Sendable { let id: String; let studentProfile: Profile? }
     struct Profile: Decodable, Sendable { let displayName: String }
 }
-struct OrbitNotification: Decodable, Identifiable, Sendable { let id: String; let type: String; let title: String; let body: String; let readAt: String?; let createdAt: String }
+struct OrbitNotification: Decodable, Identifiable, Sendable {
+    struct Payload: Decodable, Sendable { let eventId: String?; let reviewId: String?; let clubId: String? }
+    let id: String; let type: String; let title: String; let body: String; let readAt: String?; let createdAt: String; let payload: Payload?
+}
 
 struct CommunityAPI: Sendable {
     let baseURL: URL
@@ -65,11 +80,14 @@ struct CommunityAPI: Sendable {
 
     func profile() async throws -> StudentProfileData { try await authorized("GET", "me/profile") }
     func updateProfile(_ values: [String: Any]) async throws -> StudentProfileData { try await authorized("PATCH", "me/profile", body: values) }
+    func draftTeam(eventId: String, prompt: String) async throws -> AITeamDraft { try await authorized("POST", "ai/teams/draft", body: ["eventId": eventId, "prompt": prompt]) }
+    func organizerEventIdeas(clubId: String, prompt: String) async throws -> OrganizerIdeasResponse { try await authorized("POST", "ai/organizer/event-ideas", body: ["clubId": clubId, "prompt": prompt]) }
     func addProject(title: String, description: String, url: String) async throws -> StudentProject { try await authorized("POST", "me/projects", body: ["title": title, "description": description, "url": url]) }
     func updateProject(id: String, title: String, description: String, url: String) async throws { let _: EmptyResponse = try await authorized("PATCH", "me/projects/\(id)", body: ["title": title, "description": description, "url": url]) }
     func deleteProject(id: String) async throws { let _: EmptyResponse = try await authorized("DELETE", "me/projects/\(id)") }
     func colleges() async throws -> [StudentCollege] { try await send("GET", "clubs/colleges") }
     func inbox() async throws -> InboxData { try await authorized("GET", "me/inbox") }
+    func event(id: String) async throws -> OrbitEvent { try await authorized("GET", "events/\(id)") }
     func markNotificationRead(_ id: String) async throws { let _: EmptyResponse = try await authorized("POST", "me/notifications/\(id)/read") }
     func decideConnection(id: String, accept: Bool) async throws { let _: EmptyResponse = try await authorized("POST", "connections/requests/\(id)/\(accept ? "accept" : "decline")") }
     func decideClubInvitation(id: String, accept: Bool) async throws { let _: EmptyResponse = try await authorized("POST", "me/club-invitations/\(id)/\(accept ? "accept" : "decline")") }

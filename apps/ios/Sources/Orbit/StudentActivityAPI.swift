@@ -7,6 +7,14 @@ struct StudentRegistration: Decodable, Identifiable, Sendable {
 }
 struct StudentRegistrationReceipt: Decodable, Sendable { let id: String; let status: String }
 struct SavedEventItem: Decodable, Identifiable, Sendable { let id: String; let event: OrbitEvent }
+struct EventReview: Decodable, Identifiable, Sendable {
+    let id: String; let eventId: String; let authorId: String; let rating: Int; let body: String
+    let organizerReply: String?; let organizerRepliedAt: Date?; let createdAt: Date; let updatedAt: Date; let authorName: String
+}
+struct EventReviewPage: Decodable, Sendable { let data: [EventReview]; let averageRating: Double?; let reviewCount: Int }
+struct EventThreadMessage: Decodable, Identifiable, Sendable {
+    let id: String; let eventId: String; let senderId: String; let senderName: String; let body: String; let createdAt: Date
+}
 
 struct StudentActivityAPI: Sendable {
     let baseURL: URL
@@ -18,14 +26,18 @@ struct StudentActivityAPI: Sendable {
     func unsave(eventId: String) async throws { let _: SuccessResponse = try await authorized("DELETE", "events/\(eventId)/save") }
     func register(eventId: String) async throws -> StudentRegistrationReceipt { try await authorized("POST", "events/\(eventId)/registrations") }
     func cancel(eventId: String) async throws { let _: SuccessResponse = try await authorized("DELETE", "events/\(eventId)/registrations/me") }
+    func reviews(eventId: String) async throws -> EventReviewPage { try await authorized("GET", "events/\(eventId)/reviews") }
+    func submitReview(eventId: String, rating: Int, body: String) async throws { let _: EventReview = try await authorized("POST", "events/\(eventId)/reviews", body: ["rating": rating, "body": body]) }
+    func eventMessages(eventId: String) async throws -> [EventThreadMessage] { try await authorized("GET", "events/\(eventId)/messages") }
+    func postEventMessage(eventId: String, body: String) async throws { let _: EventThreadMessage = try await authorized("POST", "events/\(eventId)/messages", body: ["body": body]) }
 
-    private func authorized<T: Decodable>(_ method: String, _ path: String) async throws -> T {
+    private func authorized<T: Decodable>(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> T {
         guard let refreshToken = TokenVault.load() else { throw StudentActivityError.message("Sign in to continue.") }
         let tokens: AuthTokens = try await send("POST", "auth/refresh", body: ["refreshToken": refreshToken])
         try TokenVault.save(tokens.refreshToken)
-        return try await send(method, path, accessToken: tokens.accessToken)
+        return try await send(method, path, accessToken: tokens.accessToken, body: body)
     }
-    private func send<T: Decodable>(_ method: String, _ path: String, accessToken: String? = nil, body: [String: String]? = nil) async throws -> T {
+    private func send<T: Decodable>(_ method: String, _ path: String, accessToken: String? = nil, body: [String: Any]? = nil) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method
         if let accessToken { request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization") }

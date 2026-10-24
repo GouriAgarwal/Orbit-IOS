@@ -17,6 +17,68 @@ export class ClubsController {
     return this.prisma.club.findMany({ where: { memberships: { some: { userId: request.user.id, status: 'active' } } }, include: { college: true, memberships: { where: { userId: request.user.id, status: 'active' }, select: { role: true } } }, orderBy: { name: 'asc' } }).then((clubs) => clubs.map(({ memberships, ...club }) => ({ ...club, currentRole: memberships[0]?.role ?? 'editor' })));
   }
 
+  @Get('verification/me')
+  @UseGuards(AuthGuard)
+  verificationRequests(@Req() request: UserRequest) {
+    return this.prisma.clubVerificationRequest.findMany({
+      where: { applicantId: request.user.id },
+      include: { club: { include: { college: true } } },
+      orderBy: { submittedAt: 'desc' },
+    });
+  }
+
+  @Post(':clubId/verification')
+  @UseGuards(AuthGuard)
+  async resubmitVerification(@Req() request: UserRequest, @Param('clubId') clubId: string, @Body() body: { proofUrl: string; proofNotes: string }) {
+    const existing = await this.prisma.clubVerificationRequest.findFirst({ where: { clubId, applicantId: request.user.id }, include: { club: true }, orderBy: { submittedAt: 'desc' } });
+    if (!existing || existing.status !== 'rejected') throw new NotFoundException({ error: { code: 'VERIFICATION_RESUBMISSION_UNAVAILABLE', message: 'Only the applicant of a rejected club request can resubmit it.' } });
+    const proofUrl = body.proofUrl?.trim();
+    const proofNotes = body.proofNotes?.trim();
+    let parsedProofUrl: URL | undefined;
+    try { parsedProofUrl = new URL(proofUrl); } catch { /* validated below */ }
+    if (!parsedProofUrl || parsedProofUrl.protocol !== 'https:' || !proofNotes || proofNotes.length < 10 || proofNotes.length > 1000) throw new BadRequestException({ error: { code: 'INVALID_CLUB_VERIFICATION', message: 'Provide an official HTTPS club or college page and 10–1,000 characters explaining the proof.' } });
+    const eligibleAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    const [claim] = await this.prisma.$transaction([
+      this.prisma.clubVerificationRequest.update({ where: { id: existing.id }, data: { proofUrl: parsedProofUrl.toString(), proofNotes, status: 'pending', submittedAt: new Date(), eligibleAt, reviewedAt: null, reviewNote: null }, include: { club: { include: { college: true } } } }),
+      this.prisma.club.update({ where: { id: clubId }, data: { verificationStatus: 'pending' } }),
+    ]);
+    return claim;
+  }
+
+  @Get('verification/queue')
+  @UseGuards(AuthGuard)
+  async verificationQueue(@Req() request: UserRequest) {
+    await this.requireVerifier(request.user.id);
+    return this.prisma.clubVerificationRequest.findMany({
+      where: { status: 'pending' },
+      include: { club: { include: { college: true } }, applicant: { select: { emailNormalized: true, studentProfile: { select: { displayName: true } } } } },
+      orderBy: [{ eligibleAt: 'asc' }, { submittedAt: 'asc' }],
+    });
+  }
+
+  @Patch('verification/:requestId')
+  @UseGuards(AuthGuard)
+  async decideVerification(@Req() request: UserRequest, @Param('requestId') requestId: string, @Body() body: { decision: string; note?: string }) {
+    await this.requireVerifier(request.user.id);
+    if (!['approve', 'reject'].includes(body.decision)) throw new BadRequestException({ error: { code: 'INVALID_VERIFICATION_DECISION', message: 'Choose approve or reject.' } });
+    const claim = await this.prisma.clubVerificationRequest.findUnique({ where: { id: requestId }, include: { club: true, applicant: { select: { emailNormalized: true } } } });
+    if (!claim || claim.status !== 'pending') throw new NotFoundException({ error: { code: 'VERIFICATION_REQUEST_UNAVAILABLE', message: 'This verification request is no longer pending.' } });
+    const reviewNote = body.note?.trim().slice(0, 500) ?? '';
+    if (body.decision === 'approve' && claim.eligibleAt > new Date()) {
+      throw new BadRequestException({ error: { code: 'VERIFICATION_HOLD_ACTIVE', message: `The 48-hour holding period ends at ${claim.eligibleAt.toISOString()}.` } });
+    }
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.clubVerificationRequest.updateMany({ where: { id: requestId, status: 'pending' }, data: { status: body.decision === 'approve' ? 'approved' : 'rejected', reviewedAt: new Date(), reviewNote } });
+      if (!updated.count) throw new ConflictException({ error: { code: 'VERIFICATION_REQUEST_UNAVAILABLE', message: 'This verification request was already reviewed.' } });
+      await tx.club.update({ where: { id: claim.clubId }, data: { verificationStatus: body.decision === 'approve' ? 'verified' : 'rejected' } });
+      if (body.decision === 'approve') {
+        await tx.clubMembership.upsert({ where: { clubId_userId: { clubId: claim.clubId, userId: claim.applicantId } }, create: { clubId: claim.clubId, userId: claim.applicantId, role: 'owner', status: 'active' }, update: { role: 'owner', status: 'active' } });
+      }
+      await tx.notification.create({ data: { userId: claim.applicantId, type: `club_verification_${body.decision}`, title: body.decision === 'approve' ? 'Club verified' : 'Verification needs changes', body: body.decision === 'approve' ? `${claim.club.name} is verified. You can now manage the club in Orbit.` : `${claim.club.name} needs more verification information.${reviewNote ? ` Reviewer note: ${reviewNote}` : ''}`, payload: { clubId: claim.clubId, verificationRequestId: requestId } } });
+    });
+    return { success: true, verificationStatus: body.decision === 'approve' ? 'verified' : 'rejected' };
+  }
+
   @Get(':clubId/members')
   @UseGuards(AuthGuard)
   async members(@Req() request: UserRequest, @Param('clubId') clubId: string) {
@@ -73,13 +135,33 @@ export class ClubsController {
 
   @Post()
   @UseGuards(AuthGuard)
-  async create(@Req() request: UserRequest, @Body() body: { collegeId: string; name: string; description?: string }) {
+  async create(@Req() request: UserRequest, @Body() body: { collegeId: string; name: string; description?: string; proofUrl: string; proofNotes: string }) {
     const name = body.name?.trim();
-    if (!name || name.length > 100 || !body.collegeId) throw new BadRequestException({ error: { code: 'INVALID_CLUB', message: 'Choose a college and provide a club name under 100 characters.' } });
+    const proofUrl = body.proofUrl?.trim();
+    const proofNotes = body.proofNotes?.trim();
+    let parsedProofUrl: URL | undefined;
+    try { parsedProofUrl = new URL(proofUrl); } catch { /* validated below */ }
+    if (!name || name.length > 100 || !body.collegeId || !parsedProofUrl || parsedProofUrl.protocol !== 'https:' || !proofNotes || proofNotes.length < 10 || proofNotes.length > 1000) {
+      throw new BadRequestException({ error: { code: 'INVALID_CLUB_VERIFICATION', message: 'Provide the college, club name, an official HTTPS club or college page, and 10–1,000 characters explaining the proof.' } });
+    }
+    const eligibleAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
     return this.prisma.club.create({
-      data: { collegeId: body.collegeId, name, description: body.description?.trim() ?? '', memberships: { create: { userId: request.user.id, role: 'owner' } } },
-      include: { college: true },
+      data: {
+        collegeId: body.collegeId,
+        name,
+        description: body.description?.trim() ?? '',
+        verificationStatus: 'pending',
+        verificationRequest: { create: { applicantId: request.user.id, proofUrl: parsedProofUrl.toString(), proofNotes, eligibleAt } },
+      },
+      include: { college: true, verificationRequest: true },
     });
+  }
+
+  private async requireVerifier(userId: string) {
+    const allowed = (process.env.ORBIT_CLUB_VERIFIER_EMAILS ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
+    if (!allowed.length) throw new ForbiddenException({ error: { code: 'CLUB_VERIFICATION_NOT_CONFIGURED', message: 'Club verification reviewers have not been configured.' } });
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { emailNormalized: true } });
+    if (!user || !allowed.includes(user.emailNormalized)) throw new ForbiddenException({ error: { code: 'CLUB_VERIFIER_REQUIRED', message: 'Only a configured Orbit club verifier can review club claims.' } });
   }
 
   private async requireManager(userId: string, clubId: string) {

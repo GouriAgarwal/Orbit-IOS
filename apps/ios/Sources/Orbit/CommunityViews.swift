@@ -404,6 +404,9 @@ private struct CreateTeamSheet: View {
     @State private var goal = ""
     @State private var details = ""
     @State private var roles = [TeamRoleDraft()]
+    @State private var assistantPrompt = ""
+    @State private var assistantMessage: String?
+    @State private var isGeneratingDraft = false
     private var selectedEvent: TeamEventOption? { events.first { $0.id == selectedEventId } }
     let create: (String, String, String, String, [TeamRoleDraft], Int) -> Void
     var body: some View {
@@ -415,6 +418,19 @@ private struct CreateTeamSheet: View {
                         ForEach(events) { event in Text("\(event.title) · \(event.startsAt.prefix(10))").tag(event.id) }
                     }
                 }
+                Section {
+                    TextField("What are you hoping to build or achieve?", text: $assistantPrompt, axis: .vertical).lineLimit(2...4)
+                    Button {
+                        Task { await draftWithOrbit() }
+                    } label: {
+                        HStack {
+                            if isGeneratingDraft { ProgressView() }
+                            else { Image(systemName: "sparkles"); Text("Draft team with Orbit AI") }
+                        }
+                    }.disabled(isGeneratingDraft || selectedEventId.isEmpty || assistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).count < 8)
+                    Text("Your prompt, skills, interests, and event details go to Gemini to prepare an editable draft. Orbit does not post or invite anyone until you confirm.").font(.caption).foregroundStyle(.secondary)
+                    if let assistantMessage { Text(assistantMessage).font(.caption).foregroundColor(assistantMessage.hasPrefix("Draft ready") ? Color.secondary : Color.red) }
+                } header: { Label("Start with Orbit AI", systemImage: "sparkles") }
                 Section("Team profile") {
                 TextField("Team name", text: $name)
                 TextField("Goal", text: $goal)
@@ -440,5 +456,27 @@ private struct CreateTeamSheet: View {
             }
             .onAppear { if selectedEventId.isEmpty { selectedEventId = events.first?.id ?? "" } }
         }
+    }
+
+    private func draftWithOrbit() async {
+        guard !selectedEventId.isEmpty else { return }
+        isGeneratingDraft = true
+        assistantMessage = nil
+        defer { isGeneratingDraft = false }
+        do {
+            let draft = try await CommunityAPI().draftTeam(eventId: selectedEventId, prompt: assistantPrompt)
+            name = draft.name
+            goal = draft.goal
+            details = draft.description
+            roles = draft.roles.map { role in
+                var value = TeamRoleDraft()
+                value.title = role.title
+                value.description = role.description
+                value.skills = role.requiredSkills.joined(separator: ", ")
+                value.openings = role.openings
+                return value
+            }
+            assistantMessage = "Draft ready. Review and edit the roles before creating your team."
+        } catch { assistantMessage = error.localizedDescription }
     }
 }

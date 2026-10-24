@@ -8,7 +8,8 @@ struct OrbitApp: App {
         WindowGroup {
             Group {
                 if auth.signedIn {
-                    if auth.organizerMode { OrganizerTabView() }
+                    if auth.needsInterestSetup { InterestSetupView() }
+                    else if auth.organizerMode { OrganizerTabView() }
                     else { RootTabView() }
                 }
                 else { AuthView() }

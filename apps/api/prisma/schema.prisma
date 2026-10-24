@@ -117,6 +117,9 @@ model User {
   connectionsSent     ConnectionRequest[] @relation("ConnectionSender")
   connectionsReceived ConnectionRequest[] @relation("ConnectionRecipient")
   notifications       Notification[]
+  eventReviews        EventReview[]       @relation("EventReviewAuthor")
+  eventMessages       EventMessage[]      @relation("EventMessageSender")
+  clubVerificationRequests ClubVerificationRequest[] @relation("ClubVerificationApplicant")
   createdAt           DateTime            @default(now()) @map("created_at")
   updatedAt           DateTime            @updatedAt @map("updated_at")
 
@@ -179,11 +182,31 @@ model Club {
   college            College          @relation(fields: [collegeId], references: [id], onDelete: Restrict)
   events             Event[]
   memberships        ClubMembership[]
+  verificationRequest ClubVerificationRequest?
   createdAt          DateTime         @default(now()) @map("created_at")
   updatedAt          DateTime         @updatedAt @map("updated_at")
 
   @@unique([collegeId, name])
   @@map("clubs")
+}
+
+model ClubVerificationRequest {
+  id           String   @id @default(uuid()) @db.Uuid
+  clubId       String   @unique @map("club_id") @db.Uuid
+  applicantId  String   @map("applicant_id") @db.Uuid
+  proofUrl     String   @map("proof_url")
+  proofNotes   String   @map("proof_notes")
+  status       String   @default("pending")
+  submittedAt  DateTime @default(now()) @map("submitted_at")
+  eligibleAt   DateTime @map("eligible_at")
+  reviewedAt   DateTime? @map("reviewed_at")
+  reviewNote   String?  @map("review_note")
+  club         Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  applicant    User     @relation("ClubVerificationApplicant", fields: [applicantId], references: [id], onDelete: Cascade)
+
+  @@index([status, eligibleAt])
+  @@index([applicantId, submittedAt])
+  @@map("club_verification_requests")
 }
 
 model ClubMembership {
@@ -223,6 +246,8 @@ model Event {
   club                 Club             @relation(fields: [clubId], references: [id], onDelete: Restrict)
   registrations        Registration[]
   savedBy              SavedEvent[]
+  reviews              EventReview[]
+  messages             EventMessage[]
   teams                Team[]
   createdAt            DateTime         @default(now()) @map("created_at")
   updatedAt            DateTime         @updatedAt @map("updated_at")
@@ -381,6 +406,37 @@ model SavedEvent {
   @@unique([studentId, eventId])
   @@index([studentId, savedAt])
   @@map("saved_events")
+}
+
+model EventReview {
+  id                  String   @id @default(uuid()) @db.Uuid
+  eventId             String   @map("event_id") @db.Uuid
+  authorId            String   @map("author_id") @db.Uuid
+  rating              Int
+  body                String
+  organizerReply      String?  @map("organizer_reply")
+  organizerRepliedAt  DateTime? @map("organizer_replied_at")
+  event               Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  author              User     @relation("EventReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@unique([eventId, authorId])
+  @@index([eventId, createdAt])
+  @@map("event_reviews")
+}
+
+model EventMessage {
+  id        String   @id @default(uuid()) @db.Uuid
+  eventId   String   @map("event_id") @db.Uuid
+  senderId  String   @map("sender_id") @db.Uuid
+  body      String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sender    User     @relation("EventMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([eventId, createdAt])
+  @@map("event_messages")
 }
 
 model ConnectionRequest {

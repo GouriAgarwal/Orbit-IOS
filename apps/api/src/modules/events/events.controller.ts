@@ -28,6 +28,12 @@ export class EventsController {
     return this.events.list({ campus, category, from, to, q, cursor });
   }
 
+  @Get('recommended')
+  @UseGuards(AuthGuard)
+  recommended(@Req() request: { user: { id: string } }, @Query('campus') campus?: string, @Query('category') category?: string, @Query('from') from?: string, @Query('to') to?: string, @Query('q') q?: string) {
+    return this.events.recommended(request.user.id, { campus, category, from, to, q });
+  }
+
   @Get('mine')
   @UseGuards(AuthGuard)
   mine(@Req() request: { user: { id: string } }) { return this.events.mine(request.user.id); }
@@ -39,6 +45,31 @@ export class EventsController {
   @Get('my-saved')
   @UseGuards(AuthGuard)
   saved(@Req() request: { user: { id: string } }) { return this.events.savedEvents(request.user.id); }
+
+  @Get(':eventId/reviews')
+  reviews(@Param('eventId') eventId: string) { return this.events.reviews(eventId); }
+
+  @Post(':eventId/reviews')
+  @UseGuards(AuthGuard)
+  review(@Req() request: { user: { id: string } }, @Param('eventId') eventId: string, @Body() body: { rating: number; body: string }) {
+    return this.events.createReview(request.user.id, eventId, body.rating, body.body);
+  }
+
+  @Patch(':eventId/reviews/:reviewId/reply')
+  @UseGuards(AuthGuard)
+  reply(@Req() request: { user: { id: string } }, @Param('eventId') eventId: string, @Param('reviewId') reviewId: string, @Body() body: { reply: string }) {
+    return this.events.replyToReview(request.user.id, eventId, reviewId, body.reply);
+  }
+
+  @Get(':eventId/messages')
+  @UseGuards(AuthGuard)
+  messages(@Req() request: { user: { id: string } }, @Param('eventId') eventId: string) { return this.events.eventMessages(request.user.id, eventId); }
+
+  @Post(':eventId/messages')
+  @UseGuards(AuthGuard)
+  postMessage(@Req() request: { user: { id: string } }, @Param('eventId') eventId: string, @Body() body: { body: string }) {
+    return this.events.postEventMessage(request.user.id, eventId, body.body);
+  }
 
   @Post(':eventId/save')
   @UseGuards(AuthGuard)

@@ -5,6 +5,7 @@ struct OrbitEvent: Identifiable, Decodable, Hashable, Sendable {
         let id: String
         let name: String
         let college: String
+        let organizerName: String?
     }
 
     let id: String

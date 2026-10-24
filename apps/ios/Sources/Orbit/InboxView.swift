@@ -4,6 +4,7 @@ import SwiftUI
 final class InboxViewModel: ObservableObject {
     @Published var inbox: InboxData?
     @Published var error: String?
+    @Published var selectedEvent: OrbitEvent?
     @Published var busy = false
     private let api = CommunityAPI()
     func load() async { busy = true; defer { busy = false }; do { inbox = try await api.inbox(); error = nil } catch { self.error = error.localizedDescription } }
@@ -12,6 +13,18 @@ final class InboxViewModel: ObservableObject {
     func decideConnection(_ request: ConnectionRequestItem, accept: Bool) async { do { try await api.decideConnection(id: request.id, accept: accept); await load() } catch { self.error = error.localizedDescription } }
     func decideClub(_ invitation: ClubInvitation, accept: Bool) async { do { try await api.decideClubInvitation(id: invitation.id, accept: accept); await load() } catch { self.error = error.localizedDescription } }
     func read(_ notification: OrbitNotification) async { do { try await api.markNotificationRead(notification.id); await load() } catch { self.error = error.localizedDescription } }
+    func saveEvent(_ event: OrbitEvent) async {
+        do { try await StudentActivityAPI().save(eventId: event.id) }
+        catch { self.error = error.localizedDescription }
+    }
+    func openEventUpdate(_ notification: OrbitNotification) async {
+        do {
+            if notification.readAt == nil { try await api.markNotificationRead(notification.id) }
+            guard let eventId = notification.payload?.eventId else { throw URLError(.badURL) }
+            selectedEvent = try await api.event(id: eventId)
+            await load()
+        } catch { self.error = error.localizedDescription }
+    }
 }
 
 struct InboxView: View {
@@ -21,6 +34,7 @@ struct InboxView: View {
             List {
                 if let error = model.error { Section { Text(error).foregroundStyle(.red) } }
                 if let inbox = model.inbox {
+                    eventConversationSection(inbox.notifications)
                     Section("Club invitations") {
                         if inbox.clubInvitations.isEmpty { Text("Club invitations will appear here.").foregroundStyle(.secondary) }
                         ForEach(inbox.clubInvitations) { invitation in
@@ -76,8 +90,9 @@ struct InboxView: View {
                         }
                     }
                     Section("Notifications") {
-                        if inbox.notifications.isEmpty { Text("You’re all caught up.").foregroundStyle(.secondary) }
-                        ForEach(inbox.notifications) { notification in
+                        let otherNotifications = inbox.notifications.filter { !Self.eventConversationTypes.contains($0.type) }
+                        if otherNotifications.isEmpty { Text("You’re all caught up.").foregroundStyle(.secondary) }
+                        ForEach(otherNotifications) { notification in
                             Button { if notification.readAt == nil { Task { await model.read(notification) } } } label: {
                                 HStack(alignment: .top, spacing: 10) {
                                     Circle().fill(notification.readAt == nil ? OrbitStyle.coral : .clear).frame(width: 8, height: 8).padding(.top, 5)
@@ -88,6 +103,75 @@ struct InboxView: View {
                     }
                 }
             }.refreshable { await model.load() }.overlay { if model.busy && model.inbox == nil { ProgressView() } }.navigationTitle("Inbox").task { await model.load() }
+                .sheet(item: $model.selectedEvent) { event in
+                    EventDetailView(event: event, isSaved: false) {
+                        Task { await model.saveEvent(event) }
+                    }
+                }
         }
+    }
+
+    private static let eventConversationTypes: Set<String> = ["event_review_reply", "event_review_received", "event_thread_message"]
+
+    @ViewBuilder
+    private func eventConversationSection(_ notifications: [OrbitNotification]) -> some View {
+        let updates = notifications.filter { Self.eventConversationTypes.contains($0.type) }
+        if !updates.isEmpty {
+            Section {
+                ForEach(updates) { notification in
+                    EventConversationNotificationRow(notification: notification) {
+                        Task { await model.openEventUpdate(notification) }
+                    }
+                    .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
+                    .listRowBackground(Color.clear)
+                }
+            } header: {
+                Label("Event conversations", systemImage: "sparkles")
+            }
+        }
+    }
+}
+
+private struct EventConversationNotificationRow: View {
+    let notification: OrbitNotification
+    let action: () -> Void
+
+    private var symbol: String {
+        switch notification.type {
+        case "event_review_reply": "bubble.left.and.text.bubble.right.fill"
+        case "event_thread_message": "bubble.left.and.bubble.right.fill"
+        default: "star.bubble.fill"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.title3)
+                    .foregroundStyle(OrbitStyle.ink)
+                    .frame(width: 42, height: 42)
+                    .background(OrbitStyle.mint, in: RoundedRectangle(cornerRadius: 13))
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(notification.title).font(.subheadline.weight(.bold)).foregroundStyle(OrbitStyle.ink)
+                        if notification.readAt == nil {
+                            Text("NEW")
+                                .font(.system(size: 9, weight: .black))
+                                .padding(.horizontal, 7).padding(.vertical, 4)
+                                .background(OrbitStyle.coral.opacity(0.18), in: Capsule())
+                                .foregroundStyle(OrbitStyle.coral)
+                        }
+                    }
+                    Text(notification.body).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                    Label("Open event conversation", systemImage: "arrow.up.right")
+                        .font(.caption2.weight(.bold)).foregroundStyle(OrbitStyle.ink).padding(.top, 2)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(OrbitStyle.card, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
