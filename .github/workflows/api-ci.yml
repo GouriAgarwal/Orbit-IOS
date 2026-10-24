@@ -1,0 +1,20 @@
+name: API CI
+on:
+  push:
+    paths: ['apps/api/**', 'packages/api-contract/**']
+  pull_request:
+    paths: ['apps/api/**', 'packages/api-contract/**']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - run: npm install
+        working-directory: apps/api
+      - run: npx prisma generate && npm run build
+        working-directory: apps/api
